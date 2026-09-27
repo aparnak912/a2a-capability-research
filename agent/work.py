@@ -25,6 +25,7 @@ def parse_message(message: str) -> tuple[str, int, str]:
 
     Commands:
     - ``slow 4 alpha`` waits 4 seconds and labels the run ``alpha``
+    - ``ask`` stops and waits for a later answer on the same task
     - ``add 2 3`` returns the sum
     - anything else is returned unchanged
     """
@@ -32,6 +33,9 @@ def parse_message(message: str) -> tuple[str, int, str]:
     parts = message.strip().split()
     if not parts:
         return "echo", 0, ""
+    if parts[0] == "ask":
+        question = " ".join(parts[1:]) if len(parts) > 1 else "need an answer"
+        return "ask", 0, question
     if parts[0] == "slow":
         seconds = 4
         rest = parts[1:]
@@ -69,6 +73,9 @@ async def iter_work(
     """
 
     kind, seconds, label = parse_message(message)
+    if kind == "ask":
+        yield WorkEvent("input", label)
+        return
     if kind == "slow":
         for second in range(1, seconds + 1):
             if await _wait(1, cancel_event):

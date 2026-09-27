@@ -4,9 +4,14 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+import httpx
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
-from a2a.server.tasks import DatabaseTaskStore
+from a2a.server.tasks import (
+    BasePushNotificationSender,
+    DatabasePushNotificationConfigStore,
+    DatabaseTaskStore,
+)
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from starlette.applications import Starlette
@@ -48,18 +53,24 @@ def create_app(engine: AsyncEngine | None = None) -> Starlette:
     card = build_agent_card(base_url())
     db_engine = engine or create_engine()
     task_store = DatabaseTaskStore(db_engine, create_table=True)
+    push_store = DatabasePushNotificationConfigStore(db_engine, create_table=True)
+    push_http = httpx.AsyncClient(timeout=10)
     handler = DefaultRequestHandler(
         agent_executor=DemoExecutor(),
         task_store=task_store,
         agent_card=card,
+        push_config_store=push_store,
+        push_sender=BasePushNotificationSender(push_http, push_store),
     )
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         await task_store.initialize()
+        await push_store.initialize()
         try:
             yield
         finally:
+            await push_http.aclose()
             await db_engine.dispose()
 
     routes = [

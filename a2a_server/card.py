@@ -29,7 +29,7 @@ def build_agent_card(base_url: str) -> AgentCard:
         ],
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
-        capabilities=AgentCapabilities(streaming=True),
+        capabilities=AgentCapabilities(streaming=True, push_notifications=True),
         skills=[
             AgentSkill(
                 id="slow",
@@ -44,6 +44,13 @@ def build_agent_card(base_url: str) -> AgentCard:
                 description="Returns the input text.",
                 tags=["echo"],
                 examples=["hello"],
+            ),
+            AgentSkill(
+                id="ask",
+                name="Ask",
+                description="Stops until a later message on the same task supplies the answer.",
+                tags=["input"],
+                examples=["ask"],
             ),
             AgentSkill(
                 id="add",

@@ -41,6 +41,8 @@ BASE = f"http://{HOST}:{PORT}"
 DB_PATH = ROOT / "data" / "a2a_tasks.db"
 SLOW_SECONDS = 4
 SHAPE_PORT = "9010"
+GATEWAY = "http://127.0.0.1:8124"
+GATEWAY_AGENT = "demo-tracker"
 
 
 def rpc(method: str, params: dict, request_id: str | None = None) -> dict:
@@ -87,16 +89,20 @@ def task_id_of(payload: dict) -> str:
     return as_task(payload)["id"]
 
 
-def result_text(payload: dict) -> str:
+def artifact_text(payload: dict, name: str) -> str:
     task = as_task(payload)
     texts: list[str] = []
     for artifact in task.get("artifacts", []):
-        if artifact.get("name") != "result":
+        if artifact.get("name") != name:
             continue
         for part in artifact.get("parts", []):
             if "text" in part:
                 texts.append(part["text"])
     return " | ".join(texts)
+
+
+def result_text(payload: dict) -> str:
+    return artifact_text(payload, "result")
 
 
 def stamp(label: str) -> None:
@@ -113,12 +119,14 @@ class Caller:
         session_id: str | None = None,
         region: str | None = None,
         credentials: Credentials | None = None,
+        agent_id: str | None = None,
     ) -> None:
         self.http = http
         self.base = base.rstrip("/")
         self.session_id = session_id
         self.region = region
         self.credentials = credentials
+        self.agent_id = agent_id
 
     def _url(self, path: str) -> str:
         suffix = path if path.startswith("/") else f"/{path}"
@@ -134,6 +142,8 @@ class Caller:
             hdrs.pop("Content-Type", None)
         if self.session_id:
             hdrs[SESSION_HEADER] = self.session_id
+        if self.agent_id:
+            hdrs["X-Agent-Id"] = self.agent_id
         if self.credentials is None or self.region is None:
             return hdrs
         return sign_headers(
@@ -395,6 +405,18 @@ def start_server(extra_env: dict[str, str] | None = None) -> subprocess.Popen[by
     )
 
 
+def start_gateway() -> subprocess.Popen[bytes]:
+    env = os.environ.copy()
+    env["A2A_UPSTREAM"] = BASE
+    env["GATEWAY_HOST"] = "127.0.0.1"
+    env["GATEWAY_PORT"] = "8124"
+    return subprocess.Popen(
+        [sys.executable, "-m", "gateway"],
+        cwd=ROOT,
+        env=env,
+    )
+
+
 def stop_server(server: subprocess.Popen[bytes]) -> None:
     server.terminate()
     try:
@@ -587,6 +609,118 @@ def prove_listen_defaults() -> None:
         raise AssertionError(probe.stderr or probe.stdout)
 
 
+async def wait_for_gateway(http: httpx.AsyncClient) -> None:
+    deadline = time.perf_counter() + 15
+    while time.perf_counter() < deadline:
+        try:
+            response = await http.get(f"{GATEWAY}/callbacks")
+            if response.status_code == 200:
+                return
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0.2)
+    raise TimeoutError(f"gateway never came up at {GATEWAY}")
+
+
+async def read_sse(client: Caller, body: dict) -> list[dict]:
+    events: list[dict] = []
+    async with client.stream_rpc(body) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            events.append(json.loads(line.removeprefix("data:").strip()))
+    return events
+
+
+async def prove_ask_and_push(client: Caller, http: httpx.AsyncClient) -> None:
+    asked = await post(client, rpc("SendMessage", {"message": user_message("ask")}))
+    if task_state(asked) != "TASK_STATE_INPUT_REQUIRED":
+        raise AssertionError(f"ask returned {task_state(asked)}")
+    task_id = task_id_of(asked)
+    context_id = as_task(asked).get("contextId")
+    stamp(f"ask paused id={task_id}")
+
+    await post(
+        client,
+        rpc(
+            "CreateTaskPushNotificationConfig",
+            {
+                "taskId": task_id,
+                "url": f"{GATEWAY}/callbacks",
+                "token": "local-demo",
+            },
+        ),
+    )
+    answer = user_message("blue")
+    answer["taskId"] = task_id
+    if context_id:
+        answer["contextId"] = context_id
+    done = await post(client, rpc("SendMessage", {"message": answer}))
+    stamp(f"resumed state={task_state(done)} result={result_text(done)!r}")
+    if task_state(done) != "TASK_STATE_COMPLETED":
+        raise AssertionError(f"resume returned {task_state(done)}")
+    if "blue" not in result_text(done):
+        raise AssertionError("resume lost the answer text")
+
+    deadline = time.perf_counter() + 5
+    blob = ""
+    while time.perf_counter() < deadline:
+        listed = await http.get(f"{GATEWAY}/callbacks")
+        blob = listed.text
+        if task_id in blob and "TASK_STATE_COMPLETED" in blob:
+            stamp(f"push delivered for {task_id[:8]}")
+            return
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"push callback missing the completed task: {blob}")
+
+
+async def prove_subscribe(client: Caller) -> None:
+    task_id, _elapsed, _data = await start_slow(client, "subscribe")
+    deadline = time.perf_counter() + 10
+    stored = ""
+    while time.perf_counter() < deadline:
+        stored = artifact_text(await get_task(client, task_id), "progress")
+        if "tick 1" in stored:
+            break
+        await asyncio.sleep(0.2)
+    if "tick 1" not in stored:
+        raise AssertionError(f"tick 1 was not stored before subscribe: {stored!r}")
+
+    events = await read_sse(client, rpc("SubscribeToTask", {"id": task_id}))
+    if not events:
+        raise AssertionError("SubscribeToTask produced no events")
+    first = events[0].get("result", events[0])
+    if "task" not in first:
+        raise AssertionError(f"first subscribe event was not the current task: {events[0]}")
+    later = json.dumps(events[1:])
+    if not any(f"tick {n}" in later for n in (2, 3, 4)):
+        raise AssertionError(f"subscribe did not deliver a later tick: {later}")
+    final = artifact_text(await get_task(client, task_id), "progress")
+    stamp(f"subscribe events={len(events)} stored={final!r}")
+    if "tick 1" not in final:
+        raise AssertionError("GetTask lost tick 1 after subscribe")
+
+
+async def prove_gateway_lifecycle(http: httpx.AsyncClient) -> None:
+    print("\n== 9. agent_id, pause, push, reconnect ==", flush=True)
+    gateway = start_gateway()
+    try:
+        await wait_for_gateway(http)
+        unknown = await http.post(
+            f"{GATEWAY}/",
+            headers={**headers(), "X-Agent-Id": "no-such-agent"},
+            json=rpc("GetTask", {"id": "missing"}),
+        )
+        if unknown.status_code != 404:
+            raise AssertionError(f"unknown agent_id returned {unknown.status_code}")
+        client = Caller(http, GATEWAY, agent_id=GATEWAY_AGENT)
+        await prove_ask_and_push(client, http)
+        await prove_subscribe(client)
+    finally:
+        stop_server(gateway)
+
+
 async def prove_local() -> None:
     prove_listen_defaults()
     reset_database()
@@ -597,6 +731,7 @@ async def prove_local() -> None:
         async with httpx.AsyncClient(timeout=30) as http:
             client = local_caller(http)
             completed_id, canceled_id = await prove_checks(client)
+            await prove_gateway_lifecycle(http)
             ping = await http.get(f"{BASE}/ping")
             if ping.status_code != 404:
                 raise AssertionError("local target should not expose /ping")

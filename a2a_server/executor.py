@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 AGENT_ID = "demo-tracker"
 
 
+def _waiting_for_input(context: RequestContext) -> bool:
+    task = context.current_task
+    if task is None:
+        return False
+    return task.status.state == TaskState.TASK_STATE_INPUT_REQUIRED
+
+
 class DemoExecutor(AgentExecutor):
     """Publish A2A task events for one shared agent run."""
 
@@ -36,6 +43,20 @@ class DemoExecutor(AgentExecutor):
         updater = TaskUpdater(event_queue, task_id, context_id)
         begin()
         try:
+            if _waiting_for_input(context):
+                logger.info(
+                    "agent_id=%s a2a_task_id=%s event=resumed answer=%r",
+                    AGENT_ID,
+                    task_id,
+                    message,
+                )
+                await updater.add_artifact(
+                    [new_text_part(message)],
+                    name="result",
+                )
+                await updater.complete()
+                return
+
             logger.info(
                 "agent_id=%s a2a_task_id=%s event=working input=%r",
                 AGENT_ID,
@@ -63,6 +84,15 @@ class DemoExecutor(AgentExecutor):
                         AGENT_ID,
                         task_id,
                     )
+                    return
+                if step.kind == "input":
+                    logger.info(
+                        "agent_id=%s a2a_task_id=%s event=input-required text=%s",
+                        AGENT_ID,
+                        task_id,
+                        step.text,
+                    )
+                    await updater.requires_input()
                     return
                 if step.kind == "progress":
                     logger.info(

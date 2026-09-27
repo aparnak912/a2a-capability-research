@@ -15,6 +15,7 @@ That starts the server, runs the four checks, and stops the server. To leave the
 
 ```bash
 uv run python -m a2a_server
+uv run python -m gateway
 ```
 
 The Agent Card is at `http://127.0.0.1:8123/.well-known/agent-card.json`. JSON-RPC calls are `POST /` with header `A2A-Version: 1.0`.
@@ -65,7 +66,11 @@ Cancel a running task with `CancelTask` and the same id. The state becomes `TASK
 
 Tasks are stored in SQLite at `data/a2a_tasks.db` (`A2A_DB_PATH`). `GetTask` reads that file, so the id, state, and result are still there after the server process restarts.
 
-Commands the agent understands: `slow 4 alpha`, `add 2 3`, or any other text, which is echoed.
+Commands the agent understands: `slow 4 alpha`, `ask`, `add 2 3`, or any other text, which is echoed.
+
+`ask` returns `TASK_STATE_INPUT_REQUIRED` and waits. A later `SendMessage` on the same task id carries the answer and the task completes.
+
+The local gateway listens on `http://127.0.0.1:8124`. Callers send the same JSON-RPC body with header `X-Agent-Id: demo-tracker` and do not send a host, port, or ARN. The gateway looks up that id and forwards the call. `CreateTaskPushNotificationConfig` can point at `http://127.0.0.1:8124/callbacks`; a finished task is POSTed there. `SubscribeToTask` with `{"id": "<task id>"}` reattaches while the task is still running: the first event is the current task, and later ticks arrive as new events. Ticks that already happened stay on the task row and are read with `GetTask`.
 
 ## What was verified
 
