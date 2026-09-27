@@ -1,0 +1,19 @@
+[project]
+name = "a2a-research"
+version = "0.1.0"
+description = "Local A2A 1.0 experiment for task tracking, streaming, and parallel starts."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "a2a-sdk[http-server,sqlite]>=1.0,<2",
+    "botocore>=1.35",
+    "httpx>=0.28",
+    "uvicorn>=0.35",
+]
+
+[tool.uv]
+package = false
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
